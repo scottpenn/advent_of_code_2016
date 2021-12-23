@@ -1,9 +1,10 @@
 mod days;
 
-const MAX_DAY: u8 = 1;
+const MAX_DAY: u8 = 2;
 
 fn main() {
-    for day in 1..=MAX_DAY {
-        days::run(day)
-    }
+    days::run(MAX_DAY);
+    // for day in 1..=MAX_DAY {
+    //     days::run(day)
+    // }
 }
