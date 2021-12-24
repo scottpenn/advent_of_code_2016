@@ -16,16 +16,15 @@ impl Solution for Day02 {
             let mut y = 1;
             for direction in line.chars() {
                 match direction {
-                    'L' => y = if y == 0 {y} else {y - 1},
-                    'R' => y = if y == 2 {y} else {y + 1},
-                    'U' => x = if x == 0 {x} else {x - 1},
-                    'D' => x = if x == 2 {x} else {x + 1},
+                    'L' => y = if y == 0 {0} else {y - 1},
+                    'R' => y = if y == 2 {2} else {y + 1},
+                    'U' => x = if x == 0 {0} else {x - 1},
+                    'D' => x = if x == 2 {2} else {x + 1},
                     _ => unreachable!()
                 };
             }
             code.push(keypad[x][y]);
         }
-
         code
     }
 
@@ -54,7 +53,6 @@ impl Solution for Day02 {
             }
             code.push(keypad[x][y]);
         }
-
         code
     }
 }

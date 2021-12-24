@@ -1,5 +1,6 @@
 mod day_01;
 mod day_02;
+mod day_03;
 
 use std::time::Instant;
 
@@ -12,6 +13,7 @@ pub fn run(day: u8) {
     let solution: Box<dyn Solution> = match day {
         1 => Box::new(day_01::Day01{}),
         2 => Box::new(day_02::Day02{}),
+        3 => Box::new(day_03::Day03{}),
         _ => unreachable!()
     };
 
