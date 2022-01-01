@@ -4,6 +4,7 @@ mod day_03;
 mod day_04;
 mod day_05;
 mod day_06;
+mod day_07;
 
 use std::time::Instant;
 
@@ -20,6 +21,7 @@ pub fn run(day: u8) {
         4 => Box::new(day_04::Day04{}),
         5 => Box::new(day_05::Day05{}),
         6 => Box::new(day_06::Day06{}),
+        7 => Box::new(day_07::Day07{}),
         _ => unreachable!()
     };
 
