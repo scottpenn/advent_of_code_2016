@@ -1,0 +1,414 @@
+<?xml version="1.0" standalone="no"?><!DOCTYPE svg PUBLIC "-//W3C//DTD SVG 1.1//EN" "http://www.w3.org/Graphics/SVG/1.1/DTD/svg11.dtd"><svg version="1.1" width="1200" height="374" onload="init(evt)" viewBox="0 0 1200 374" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" xmlns:fg="http://github.com/jonhoo/inferno"><!--Flame graph stack visualization. See https://github.com/brendangregg/FlameGraph for latest version, and http://www.brendangregg.com/flamegraphs.html for examples.--><!--NOTES: --><defs><linearGradient id="background" y1="0" y2="1" x1="0" x2="0"><stop stop-color="#eeeeee" offset="5%"/><stop stop-color="#eeeeb0" offset="95%"/></linearGradient></defs><style type="text/css">
+text { font-family:"Verdana"; font-size:12px; fill:rgb(0,0,0); }
+#title { text-anchor:middle; font-size:17px; }
+#search { opacity:0.1; cursor:pointer; }
+#search:hover, #search.show { opacity:1; }
+#subtitle { text-anchor:middle; font-color:rgb(160,160,160); }
+#unzoom { cursor:pointer; }
+#frames > *:hover { stroke:black; stroke-width:0.5; cursor:pointer; }
+.hide { display:none; }
+.parent { opacity:0.5; }
+</style><script type="text/ecmascript"><![CDATA[
+        var nametype = 'Function:';
+        var fontsize = 12;
+        var fontwidth = 0.59;
+        var xpad = 10;
+        var inverted = false;
+        var searchcolor = 'rgb(230,0,230)';
+        var fluiddrawing = true;
+        var truncate_text_right = false;
+    ]]><![CDATA["use strict";
+var details, searchbtn, unzoombtn, matchedtxt, svg, searching, frames;
+function init(evt) {
+    details = document.getElementById("details").firstChild;
+    searchbtn = document.getElementById("search");
+    unzoombtn = document.getElementById("unzoom");
+    matchedtxt = document.getElementById("matched");
+    svg = document.getElementsByTagName("svg")[0];
+    frames = document.getElementById("frames");
+    total_samples = parseInt(frames.attributes.total_samples.value);
+    searching = 0;
+
+    // Use GET parameters to restore a flamegraph's state.
+    var restore_state = function() {
+        var params = get_params();
+        if (params.x && params.y)
+            zoom(find_group(document.querySelector('[*|x="' + params.x + '"][y="' + params.y + '"]')));
+        if (params.s)
+            search(params.s);
+    };
+
+    if (fluiddrawing) {
+        // Make width dynamic so the SVG fits its parent's width.
+        svg.removeAttribute("width");
+        // Edge requires us to have a viewBox that gets updated with size changes.
+        var isEdge = /Edge\/\d./i.test(navigator.userAgent);
+        if (!isEdge) {
+          svg.removeAttribute("viewBox");
+        }
+        var update_for_width_change = function() {
+            if (isEdge) {
+                svg.attributes.viewBox.value = "0 0 " + svg.width.baseVal.value + " " + svg.height.baseVal.value;
+            }
+
+            // Keep consistent padding on left and right of frames container.
+            frames.attributes.width.value = svg.width.baseVal.value - xpad * 2;
+
+            // Text truncation needs to be adjusted for the current width.
+            var el = frames.children;
+            for(var i = 0; i < el.length; i++) {
+                update_text(el[i]);
+            }
+
+            // Keep search elements at a fixed distance from right edge.
+            var svgWidth = svg.width.baseVal.value;
+            searchbtn.attributes.x.value = svgWidth - xpad - 100;
+            matchedtxt.attributes.x.value = svgWidth - xpad - 100;
+        };
+        window.addEventListener('resize', function() {
+            update_for_width_change();
+        });
+        // This needs to be done asynchronously for Safari to work.
+        setTimeout(function() {
+            unzoom();
+            update_for_width_change();
+            restore_state();
+        }, 0);
+    } else {
+        restore_state();
+    }
+}
+// event listeners
+window.addEventListener("click", function(e) {
+    var target = find_group(e.target);
+    if (target) {
+        if (target.nodeName == "a") {
+            if (e.ctrlKey === false) return;
+            e.preventDefault();
+        }
+        if (target.classList.contains("parent")) unzoom();
+        zoom(target);
+
+        // set parameters for zoom state
+        var el = target.querySelector("rect");
+        if (el && el.attributes && el.attributes.y && el.attributes["fg:x"]) {
+            var params = get_params()
+            params.x = el.attributes["fg:x"].value;
+            params.y = el.attributes.y.value;
+            history.replaceState(null, null, parse_params(params));
+        }
+    }
+    else if (e.target.id == "unzoom") {
+        unzoom();
+
+        // remove zoom state
+        var params = get_params();
+        if (params.x) delete params.x;
+        if (params.y) delete params.y;
+        history.replaceState(null, null, parse_params(params));
+    }
+    else if (e.target.id == "search") search_prompt();
+}, false)
+// mouse-over for info
+// show
+window.addEventListener("mouseover", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = nametype + " " + g_to_text(target);
+}, false)
+// clear
+window.addEventListener("mouseout", function(e) {
+    var target = find_group(e.target);
+    if (target) details.nodeValue = ' ';
+}, false)
+// ctrl-F for search
+window.addEventListener("keydown",function (e) {
+    if (e.keyCode === 114 || (e.ctrlKey && e.keyCode === 70)) {
+        e.preventDefault();
+        search_prompt();
+    }
+}, false)
+// functions
+function get_params() {
+    var params = {};
+    var paramsarr = window.location.search.substr(1).split('&');
+    for (var i = 0; i < paramsarr.length; ++i) {
+        var tmp = paramsarr[i].split("=");
+        if (!tmp[0] || !tmp[1]) continue;
+        params[tmp[0]]  = decodeURIComponent(tmp[1]);
+    }
+    return params;
+}
+function parse_params(params) {
+    var uri = "?";
+    for (var key in params) {
+        uri += key + '=' + encodeURIComponent(params[key]) + '&';
+    }
+    if (uri.slice(-1) == "&")
+        uri = uri.substring(0, uri.length - 1);
+    if (uri == '?')
+        uri = window.location.href.split('?')[0];
+    return uri;
+}
+function find_child(node, selector) {
+    var children = node.querySelectorAll(selector);
+    if (children.length) return children[0];
+    return;
+}
+function find_group(node) {
+    var parent = node.parentElement;
+    if (!parent) return;
+    if (parent.id == "frames") return node;
+    return find_group(parent);
+}
+function orig_save(e, attr, val) {
+    if (e.attributes["fg:orig_" + attr] != undefined) return;
+    if (e.attributes[attr] == undefined) return;
+    if (val == undefined) val = e.attributes[attr].value;
+    e.setAttribute("fg:orig_" + attr, val);
+}
+function orig_load(e, attr) {
+    if (e.attributes["fg:orig_"+attr] == undefined) return;
+    e.attributes[attr].value = e.attributes["fg:orig_" + attr].value;
+    e.removeAttribute("fg:orig_" + attr);
+}
+function g_to_text(e) {
+    var text = find_child(e, "title").firstChild.nodeValue;
+    return (text)
+}
+function g_to_func(e) {
+    var func = g_to_text(e);
+    // if there's any manipulation we want to do to the function
+    // name before it's searched, do it here before returning.
+    return (func);
+}
+function update_text(e) {
+    var r = find_child(e, "rect");
+    var t = find_child(e, "text");
+    var w = parseFloat(r.attributes.width.value) * frames.attributes.width.value / 100 - 3;
+    var txt = find_child(e, "title").textContent.replace(/\([^(]*\)$/,"");
+    t.attributes.x.value = format_percent((parseFloat(r.attributes.x.value) + (100 * 3 / frames.attributes.width.value)));
+    // Smaller than this size won't fit anything
+    if (w < 2 * fontsize * fontwidth) {
+        t.textContent = "";
+        return;
+    }
+    t.textContent = txt;
+    // Fit in full text width
+    if (/^ *\$/.test(txt) || t.getComputedTextLength() < w)
+        return;
+    if (truncate_text_right) {
+        // Truncate the right side of the text.
+        for (var x = txt.length - 2; x > 0; x--) {
+            if (t.getSubStringLength(0, x + 2) <= w) {
+                t.textContent = txt.substring(0, x) + "..";
+                return;
+            }
+        }
+    } else {
+        // Truncate the left side of the text.
+        for (var x = 2; x < txt.length; x++) {
+            if (t.getSubStringLength(x - 2, txt.length) <= w) {
+                t.textContent = ".." + txt.substring(x, txt.length);
+                return;
+            }
+        }
+    }
+    t.textContent = "";
+}
+// zoom
+function zoom_reset(e) {
+    if (e.tagName == "rect") {
+        e.attributes.x.value = format_percent(100 * parseInt(e.attributes["fg:x"].value) / total_samples);
+        e.attributes.width.value = format_percent(100 * parseInt(e.attributes["fg:w"].value) / total_samples);
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_reset(c[i]);
+    }
+}
+function zoom_child(e, x, zoomed_width_samples) {
+    if (e.tagName == "text") {
+        var parent_x = parseFloat(find_child(e.parentNode, "rect[x]").attributes.x.value);
+        e.attributes.x.value = format_percent(parent_x + (100 * 3 / frames.attributes.width.value));
+    } else if (e.tagName == "rect") {
+        e.attributes.x.value = format_percent(100 * (parseInt(e.attributes["fg:x"].value) - x) / zoomed_width_samples);
+        e.attributes.width.value = format_percent(100 * parseInt(e.attributes["fg:w"].value) / zoomed_width_samples);
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_child(c[i], x, zoomed_width_samples);
+    }
+}
+function zoom_parent(e) {
+    if (e.attributes) {
+        if (e.attributes.x != undefined) {
+            e.attributes.x.value = "0.0%";
+        }
+        if (e.attributes.width != undefined) {
+            e.attributes.width.value = "100.0%";
+        }
+    }
+    if (e.childNodes == undefined) return;
+    for(var i = 0, c = e.childNodes; i < c.length; i++) {
+        zoom_parent(c[i]);
+    }
+}
+function zoom(node) {
+    var attr = find_child(node, "rect").attributes;
+    var width = parseInt(attr["fg:w"].value);
+    var xmin = parseInt(attr["fg:x"].value);
+    var xmax = xmin + width;
+    var ymin = parseFloat(attr.y.value);
+    unzoombtn.classList.remove("hide");
+    var el = frames.children;
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        var a = find_child(e, "rect").attributes;
+        var ex = parseInt(a["fg:x"].value);
+        var ew = parseInt(a["fg:w"].value);
+        // Is it an ancestor
+        if (!inverted) {
+            var upstack = parseFloat(a.y.value) > ymin;
+        } else {
+            var upstack = parseFloat(a.y.value) < ymin;
+        }
+        if (upstack) {
+            // Direct ancestor
+            if (ex <= xmin && (ex+ew) >= xmax) {
+                e.classList.add("parent");
+                zoom_parent(e);
+                update_text(e);
+            }
+            // not in current path
+            else
+                e.classList.add("hide");
+        }
+        // Children maybe
+        else {
+            // no common path
+            if (ex < xmin || ex >= xmax) {
+                e.classList.add("hide");
+            }
+            else {
+                zoom_child(e, xmin, width);
+                update_text(e);
+            }
+        }
+    }
+}
+function unzoom() {
+    unzoombtn.classList.add("hide");
+    var el = frames.children;
+    for(var i = 0; i < el.length; i++) {
+        el[i].classList.remove("parent");
+        el[i].classList.remove("hide");
+        zoom_reset(el[i]);
+        update_text(el[i]);
+    }
+}
+// search
+function reset_search() {
+    var el = document.querySelectorAll("#frames rect");
+    for (var i = 0; i < el.length; i++) {
+        orig_load(el[i], "fill")
+    }
+    var params = get_params();
+    delete params.s;
+    history.replaceState(null, null, parse_params(params));
+}
+function search_prompt() {
+    if (!searching) {
+        var term = prompt("Enter a search term (regexp " +
+            "allowed, eg: ^ext4_)", "");
+        if (term != null) {
+            search(term)
+        }
+    } else {
+        reset_search();
+        searching = 0;
+        searchbtn.classList.remove("show");
+        searchbtn.firstChild.nodeValue = "Search"
+        matchedtxt.classList.add("hide");
+        matchedtxt.firstChild.nodeValue = ""
+    }
+}
+function search(term) {
+    var re = new RegExp(term);
+    var el = frames.children;
+    var matches = new Object();
+    var maxwidth = 0;
+    for (var i = 0; i < el.length; i++) {
+        var e = el[i];
+        // Skip over frames which are either not visible, or below the zoomed-to frame
+        if (e.classList.contains("hide") || e.classList.contains("parent")) {
+            continue;
+        }
+        var func = g_to_func(e);
+        var rect = find_child(e, "rect");
+        if (func == null || rect == null)
+            continue;
+        // Save max width. Only works as we have a root frame
+        var w = parseInt(rect.attributes["fg:w"].value);
+        if (w > maxwidth)
+            maxwidth = w;
+        if (func.match(re)) {
+            // highlight
+            var x = parseInt(rect.attributes["fg:x"].value);
+            orig_save(rect, "fill");
+            rect.attributes.fill.value = searchcolor;
+            // remember matches
+            if (matches[x] == undefined) {
+                matches[x] = w;
+            } else {
+                if (w > matches[x]) {
+                    // overwrite with parent
+                    matches[x] = w;
+                }
+            }
+            searching = 1;
+        }
+    }
+    if (!searching)
+        return;
+    var params = get_params();
+    params.s = term;
+    history.replaceState(null, null, parse_params(params));
+
+    searchbtn.classList.add("show");
+    searchbtn.firstChild.nodeValue = "Reset Search";
+    // calculate percent matched, excluding vertical overlap
+    var count = 0;
+    var lastx = -1;
+    var lastw = 0;
+    var keys = Array();
+    for (k in matches) {
+        if (matches.hasOwnProperty(k))
+            keys.push(k);
+    }
+    // sort the matched frames by their x location
+    // ascending, then width descending
+    keys.sort(function(a, b){
+        return a - b;
+    });
+    // Step through frames saving only the biggest bottom-up frames
+    // thanks to the sort order. This relies on the tree property
+    // where children are always smaller than their parents.
+    for (var k in keys) {
+        var x = parseInt(keys[k]);
+        var w = matches[keys[k]];
+        if (x >= lastx + lastw) {
+            count += w;
+            lastx = x;
+            lastw = w;
+        }
+    }
+    // display matched percent
+    matchedtxt.classList.remove("hide");
+    var pct = 100 * count / maxwidth;
+    if (pct != 100) pct = pct.toFixed(1);
+    matchedtxt.firstChild.nodeValue = "Matched: " + pct + "%";
+}
+function format_percent(n) {
+    return n.toFixed(4) + "%";
+}
+]]></script><rect x="0" y="0" width="100%" height="374" fill="url(#background)"/><text id="title" x="50.0000%" y="24.00">Flame Graph</text><text id="details" x="10" y="357.00"> </text><text id="unzoom" class="hide" x="10" y="24.00">Reset Zoom</text><text id="search" x="1090" y="24.00">Search</text><text id="matched" x="1090" y="357.00"> </text><svg id="frames" x="10" width="1180" total_samples="26897"><g><title>advent_of_code_2016`&lt;alloc::string::String as core::iter::traits::collect::FromIterator&lt;char&gt;&gt;::from_iter (7 samples, 0.03%)</title><rect x="0.0000%" y="181" width="0.0260%" height="15" fill="rgb(227,0,7)" fg:x="0" fg:w="7"/><text x="0.2500%" y="191.50"></text></g><g><title>advent_of_code_2016`&lt;hex::BytesToHexChars as core::iter::traits::iterator::Iterator&gt;::next (725 samples, 2.70%)</title><rect x="2.9743%" y="149" width="2.6955%" height="15" fill="rgb(217,0,24)" fg:x="800" fg:w="725"/><text x="3.2243%" y="159.50">ad..</text></g><g><title>advent_of_code_2016`&lt;hex::BytesToHexChars as core::iter::traits::iterator::Iterator&gt;::size_hint (13 samples, 0.05%)</title><rect x="5.6698%" y="149" width="0.0483%" height="15" fill="rgb(221,193,54)" fg:x="1525" fg:w="13"/><text x="5.9198%" y="159.50"></text></g><g><title>advent_of_code_2016`__rust_alloc (7 samples, 0.03%)</title><rect x="5.7999%" y="133" width="0.0260%" height="15" fill="rgb(248,212,6)" fg:x="1560" fg:w="7"/><text x="6.0499%" y="143.50"></text></g><g><title>libsystem_malloc.dylib`tiny_malloc_from_free_list (5 samples, 0.02%)</title><rect x="6.1419%" y="85" width="0.0186%" height="15" fill="rgb(208,68,35)" fg:x="1652" fg:w="5"/><text x="6.3919%" y="95.50"></text></g><g><title>libsystem_malloc.dylib`set_tiny_meta_header_in_use (89 samples, 0.33%)</title><rect x="7.7592%" y="69" width="0.3309%" height="15" fill="rgb(232,128,0)" fg:x="2087" fg:w="89"/><text x="8.0092%" y="79.50"></text></g><g><title>libsystem_malloc.dylib`szone_malloc_should_clear (617 samples, 2.29%)</title><rect x="6.0750%" y="101" width="2.2939%" height="15" fill="rgb(207,160,47)" fg:x="1634" fg:w="617"/><text x="6.3250%" y="111.50">l..</text></g><g><title>libsystem_malloc.dylib`tiny_malloc_should_clear (594 samples, 2.21%)</title><rect x="6.1605%" y="85" width="2.2084%" height="15" fill="rgb(228,23,34)" fg:x="1657" fg:w="594"/><text x="6.4105%" y="95.50">l..</text></g><g><title>libsystem_malloc.dylib`tiny_malloc_from_free_list (75 samples, 0.28%)</title><rect x="8.0901%" y="69" width="0.2788%" height="15" fill="rgb(218,30,26)" fg:x="2176" fg:w="75"/><text x="8.3401%" y="79.50"></text></g><g><title>libsystem_malloc.dylib`_malloc_zone_malloc (666 samples, 2.48%)</title><rect x="5.9263%" y="117" width="2.4761%" height="15" fill="rgb(220,122,19)" fg:x="1594" fg:w="666"/><text x="6.1763%" y="127.50">li..</text></g><g><title>libsystem_malloc.dylib`tiny_malloc_should_clear (9 samples, 0.03%)</title><rect x="8.3690%" y="101" width="0.0335%" height="15" fill="rgb(250,228,42)" fg:x="2251" fg:w="9"/><text x="8.6190%" y="111.50"></text></g><g><title>libsystem_malloc.dylib`default_zone_malloc (11 samples, 0.04%)</title><rect x="8.4024%" y="117" width="0.0409%" height="15" fill="rgb(240,193,28)" fg:x="2260" fg:w="11"/><text x="8.6524%" y="127.50"></text></g><g><title>advent_of_code_2016`alloc::raw_vec::finish_grow (705 samples, 2.62%)</title><rect x="5.8259%" y="133" width="2.6211%" height="15" fill="rgb(216,20,37)" fg:x="1567" fg:w="705"/><text x="6.0759%" y="143.50">ad..</text></g><g><title>libsystem_malloc.dylib`_malloc_zone_malloc (6 samples, 0.02%)</title><rect x="8.4470%" y="133" width="0.0223%" height="15" fill="rgb(206,188,39)" fg:x="2272" fg:w="6"/><text x="8.6970%" y="143.50"></text></g><g><title>advent_of_code_2016`alloc::raw_vec::RawVec&lt;T,A&gt;::reserve::do_reserve_and_handle (745 samples, 2.77%)</title><rect x="5.7181%" y="149" width="2.7698%" height="15" fill="rgb(217,207,13)" fg:x="1538" fg:w="745"/><text x="5.9681%" y="159.50">ad..</text></g><g><title>libsystem_malloc.dylib`malloc (5 samples, 0.02%)</title><rect x="8.4693%" y="133" width="0.0186%" height="15" fill="rgb(231,73,38)" fg:x="2278" fg:w="5"/><text x="8.7193%" y="143.50"></text></g><g><title>advent_of_code_2016`&lt;alloc::string::String as core::iter::traits::collect::FromIterator&lt;char&gt;&gt;::from_iter (1,951 samples, 7.25%)</title><rect x="1.2715%" y="165" width="7.2536%" height="15" fill="rgb(225,20,46)" fg:x="342" fg:w="1951"/><text x="1.5215%" y="175.50">advent_of_..</text></g><g><title>advent_of_code_2016`alloc::raw_vec::finish_grow (10 samples, 0.04%)</title><rect x="8.4879%" y="149" width="0.0372%" height="15" fill="rgb(210,31,41)" fg:x="2283" fg:w="10"/><text x="8.7379%" y="159.50"></text></g><g><title>advent_of_code_2016`&lt;hex::BytesToHexChars as core::iter::traits::iterator::Iterator&gt;::next (259 samples, 0.96%)</title><rect x="8.5251%" y="165" width="0.9629%" height="15" fill="rgb(221,200,47)" fg:x="2293" fg:w="259"/><text x="8.7751%" y="175.50"></text></g><g><title>advent_of_code_2016`&lt;hex::BytesToHexChars as core::iter::traits::iterator::Iterator&gt;::size_hint (3 samples, 0.01%)</title><rect x="9.4880%" y="165" width="0.0112%" height="15" fill="rgb(226,26,5)" fg:x="2552" fg:w="3"/><text x="9.7380%" y="175.50"></text></g><g><title>advent_of_code_2016`DYLD-STUB$$memcpy (4 samples, 0.01%)</title><rect x="9.4992%" y="165" width="0.0149%" height="15" fill="rgb(249,33,26)" fg:x="2555" fg:w="4"/><text x="9.7492%" y="175.50"></text></g><g><title>advent_of_code_2016`__rdl_alloc (3 samples, 0.01%)</title><rect x="9.5141%" y="165" width="0.0112%" height="15" fill="rgb(235,183,28)" fg:x="2559" fg:w="3"/><text x="9.7641%" y="175.50"></text></g><g><title>advent_of_code_2016`__rdl_dealloc (7 samples, 0.03%)</title><rect x="9.5252%" y="165" width="0.0260%" height="15" fill="rgb(221,5,38)" fg:x="2562" fg:w="7"/><text x="9.7752%" y="175.50"></text></g><g><title>advent_of_code_2016`__rust_alloc (7 samples, 0.03%)</title><rect x="9.5513%" y="165" width="0.0260%" height="15" fill="rgb(247,18,42)" fg:x="2569" fg:w="7"/><text x="9.8013%" y="175.50"></text></g><g><title>advent_of_code_2016`alloc::raw_vec::RawVec&lt;T,A&gt;::reserve::do_reserve_and_handle (8 samples, 0.03%)</title><rect x="9.5773%" y="165" width="0.0297%" height="15" fill="rgb(241,131,45)" fg:x="2576" fg:w="8"/><text x="9.8273%" y="175.50"></text></g><g><title>libsystem_malloc.dylib`tiny_malloc_from_free_list (9 samples, 0.03%)</title><rect x="10.1684%" y="117" width="0.0335%" height="15" fill="rgb(249,31,29)" fg:x="2735" fg:w="9"/><text x="10.4184%" y="127.50"></text></g><g><title>libsystem_malloc.dylib`szone_malloc_should_clear (569 samples, 2.12%)</title><rect x="10.0903%" y="133" width="2.1155%" height="15" fill="rgb(225,111,53)" fg:x="2714" fg:w="569"/><text x="10.3403%" y="143.50">l..</text></g><g><title>libsystem_malloc.dylib`tiny_malloc_should_clear (539 samples, 2.00%)</title><rect x="10.2019%" y="117" width="2.0039%" height="15" fill="rgb(238,160,17)" fg:x="2744" fg:w="539"/><text x="10.4519%" y="127.50">l..</text></g><g><title>libsystem_malloc.dylib`tiny_malloc_from_free_list (102 samples, 0.38%)</title><rect x="11.8266%" y="101" width="0.3792%" height="15" fill="rgb(214,148,48)" fg:x="3181" fg:w="102"/><text x="12.0766%" y="111.50"></text></g><g><title>libsystem_malloc.dylib`_malloc_zone_malloc (627 samples, 2.33%)</title><rect x="9.8933%" y="149" width="2.3311%" height="15" fill="rgb(232,36,49)" fg:x="2661" fg:w="627"/><text x="10.1433%" y="159.50">l..</text></g><g><title>libsystem_malloc.dylib`tiny_malloc_should_clear (5 samples, 0.02%)</title><rect x="12.2058%" y="133" width="0.0186%" height="15" fill="rgb(209,103,24)" fg:x="3283" fg:w="5"/><text x="12.4558%" y="143.50"></text></g><g><title>libsystem_malloc.dylib`default_zone_malloc (8 samples, 0.03%)</title><rect x="12.2244%" y="149" width="0.0297%" height="15" fill="rgb(229,88,8)" fg:x="3288" fg:w="8"/><text x="12.4744%" y="159.50"></text></g><g><title>libsystem_malloc.dylib`szone_malloc (5 samples, 0.02%)</title><rect x="12.2542%" y="149" width="0.0186%" height="15" fill="rgb(213,181,19)" fg:x="3296" fg:w="5"/><text x="12.5042%" y="159.50"></text></g><g><title>libsystem_malloc.dylib`szone_malloc_should_clear (3 samples, 0.01%)</title><rect x="12.2727%" y="149" width="0.0112%" height="15" fill="rgb(254,191,54)" fg:x="3301" fg:w="3"/><text x="12.5227%" y="159.50"></text></g><g><title>advent_of_code_2016`alloc::str::_&lt;impl alloc::slice::Join&lt;&amp;str&gt; for [S]&gt;::join (748 samples, 2.78%)</title><rect x="9.6070%" y="165" width="2.7810%" height="15" fill="rgb(241,83,37)" fg:x="2584" fg:w="748"/><text x="9.8570%" y="175.50">ad..</text></g><g><title>libsystem_platform.dylib`_platform_memmove$VARIANT$Haswell (28 samples, 0.10%)</title><rect x="12.2839%" y="149" width="0.1041%" height="15" fill="rgb(233,36,39)" fg:x="3304" fg:w="28"/><text x="12.5339%" y="159.50"></text></g><g><title>advent_of_code_2016`core::fmt::Formatter::new (5 samples, 0.02%)</title><rect x="12.3880%" y="165" width="0.0186%" height="15" fill="rgb(226,3,54)" fg:x="3332" fg:w="5"/><text x="12.6380%" y="175.50"></text></g><g><title>advent_of_code_2016`core::fmt::Formatter::pad_integral (8 samples, 0.03%)</title><rect x="12.4066%" y="165" width="0.0297%" height="15" fill="rgb(245,192,40)" fg:x="3337" fg:w="8"/><text x="12.6566%" y="175.50"></text></g><g><title>advent_of_code_2016`__rdl_alloc (7 samples, 0.03%)</title><rect x="12.9531%" y="117" width="0.0260%" height="15" fill="rgb(238,167,29)" fg:x="3484" fg:w="7"/><text x="13.2031%" y="127.50"></text></g><g><title>advent_of_code_2016`__rust_alloc (5 samples, 0.02%)</title><rect x="12.9791%" y="117" width="0.0186%" height="15" fill="rgb(232,182,51)" fg:x="3491" fg:w="5"/><text x="13.2291%" y="127.50"></text></g><g><title>libsystem_malloc.dylib`tiny_malloc_from_free_list (10 samples, 0.04%)</title><rect x="13.3807%" y="69" width="0.0372%" height="15" fill="rgb(231,60,39)" fg:x="3599" fg:w="10"/><text x="13.6307%" y="79.50"></text></g><g><title>libsystem_malloc.dylib`tiny_free_list_add_ptr (5 samples, 0.02%)</title><rect x="15.1838%" y="53" width="0.0186%" height="15" fill="rgb(208,69,12)" fg:x="4084" fg:w="5"/><text x="15.4338%" y="63.50"></text></g><g><title>libsystem_malloc.dylib`szone_malloc_should_clear (779 samples, 2.90%)</title><rect x="13.3063%" y="85" width="2.8962%" height="15" fill="rgb(235,93,37)" fg:x="3579" fg:w="779"/><text x="13.5563%" y="95.50">li..</text></g><g><title>libsystem_malloc.dylib`tiny_malloc_should_clear (749 samples, 2.78%)</title><rect x="13.4179%" y="69" width="2.7847%" height="15" fill="rgb(213,116,39)" fg:x="3609" fg:w="749"/><text x="13.6679%" y="79.50">li..</text></g><g><title>libsystem_malloc.dylib`tiny_malloc_from_free_list (269 samples, 1.00%)</title><rect x="15.2024%" y="53" width="1.0001%" height="15" fill="rgb(222,207,29)" fg:x="4089" fg:w="269"/><text x="15.4524%" y="63.50"></text></g><g><title>libsystem_malloc.dylib`tiny_free_list_add_ptr (79 samples, 0.29%)</title><rect x="15.9088%" y="37" width="0.2937%" height="15" fill="rgb(206,96,30)" fg:x="4279" fg:w="79"/><text x="16.1588%" y="47.50"></text></g><g><title>libsystem_malloc.dylib`_malloc_zone_malloc (854 samples, 3.18%)</title><rect x="13.0386%" y="101" width="3.1751%" height="15" fill="rgb(218,138,4)" fg:x="3507" fg:w="854"/><text x="13.2886%" y="111.50">lib..</text></g><g><title>libsystem_malloc.dylib`tiny_malloc_should_clear (3 samples, 0.01%)</title><rect x="16.2026%" y="85" width="0.0112%" height="15" fill="rgb(250,191,14)" fg:x="4358" fg:w="3"/><text x="16.4526%" y="95.50"></text></g><g><title>libsystem_malloc.dylib`default_zone_malloc (12 samples, 0.04%)</title><rect x="16.2137%" y="101" width="0.0446%" height="15" fill="rgb(239,60,40)" fg:x="4361" fg:w="12"/><text x="16.4637%" y="111.50"></text></g><g><title>libsystem_malloc.dylib`szone_malloc (4 samples, 0.01%)</title><rect x="16.2583%" y="101" width="0.0149%" height="15" fill="rgb(206,27,48)" fg:x="4373" fg:w="4"/><text x="16.5083%" y="111.50"></text></g><g><title>advent_of_code_2016`alloc::raw_vec::finish_grow (884 samples, 3.29%)</title><rect x="12.9977%" y="117" width="3.2866%" height="15" fill="rgb(225,35,8)" fg:x="3496" fg:w="884"/><text x="13.2477%" y="127.50">adv..</text></g><g><title>libsystem_malloc.dylib`szone_malloc_should_clear (3 samples, 0.01%)</title><rect x="16.2732%" y="101" width="0.0112%" height="15" fill="rgb(250,213,24)" fg:x="4377" fg:w="3"/><text x="16.5232%" y="111.50"></text></g><g><title>libsystem_malloc.dylib`_malloc_zone_malloc (6 samples, 0.02%)</title><rect x="16.2843%" y="117" width="0.0223%" height="15" fill="rgb(247,123,22)" fg:x="4380" fg:w="6"/><text x="16.5343%" y="127.50"></text></g><g><title>advent_of_code_2016`alloc::raw_vec::RawVec&lt;T,A&gt;::reserve::do_reserve_and_handle (923 samples, 3.43%)</title><rect x="12.8973%" y="133" width="3.4316%" height="15" fill="rgb(231,138,38)" fg:x="3469" fg:w="923"/><text x="13.1473%" y="143.50">adv..</text></g><g><title>libsystem_malloc.dylib`malloc (6 samples, 0.02%)</title><rect x="16.3067%" y="117" width="0.0223%" height="15" fill="rgb(231,145,46)" fg:x="4386" fg:w="6"/><text x="16.5567%" y="127.50"></text></g><g><title>advent_of_code_2016`alloc::raw_vec::finish_grow (4 samples, 0.01%)</title><rect x="16.3290%" y="133" width="0.0149%" height="15" fill="rgb(251,118,11)" fg:x="4392" fg:w="4"/><text x="16.5790%" y="143.50"></text></g><g><title>advent_of_code_2016`&lt;alloc::string::String as core::fmt::Write&gt;::write_str (971 samples, 3.61%)</title><rect x="12.8007%" y="149" width="3.6101%" height="15" fill="rgb(217,147,25)" fg:x="3443" fg:w="971"/><text x="13.0507%" y="159.50">adve..</text></g><g><title>libsystem_platform.dylib`_platform_memmove$VARIANT$Haswell (18 samples, 0.07%)</title><rect x="16.3438%" y="133" width="0.0669%" height="15" fill="rgb(247,81,37)" fg:x="4396" fg:w="18"/><text x="16.5938%" y="143.50"></text></g><g><title>advent_of_code_2016`DYLD-STUB$$memcpy (3 samples, 0.01%)</title><rect x="16.4108%" y="149" width="0.0112%" height="15" fill="rgb(209,12,38)" fg:x="4414" fg:w="3"/><text x="16.6608%" y="159.50"></text></g><g><title>advent_of_code_2016`alloc::raw_vec::RawVec&lt;T,A&gt;::reserve::do_reserve_and_handle (6 samples, 0.02%)</title><rect x="16.4219%" y="149" width="0.0223%" height="15" fill="rgb(227,1,9)" fg:x="4417" fg:w="6"/><text x="16.6719%" y="159.50"></text></g><g><title>advent_of_code_2016`core::fmt::Formatter::pad_integral (38 samples, 0.14%)</title><rect x="16.4442%" y="149" width="0.1413%" height="15" fill="rgb(248,47,43)" fg:x="4423" fg:w="38"/><text x="16.6942%" y="159.50"></text></g><g><title>advent_of_code_2016`core::fmt::Formatter::pad_integral::write_prefix (12 samples, 0.04%)</title><rect x="16.5855%" y="149" width="0.0446%" height="15" fill="rgb(221,10,30)" fg:x="4461" fg:w="12"/><text x="16.8355%" y="159.50"></text></g><g><title>advent_of_code_2016`core::fmt::Formatter::pad_integral (8 samples, 0.03%)</title><rect x="16.6301%" y="149" width="0.0297%" height="15" fill="rgb(210,229,1)" fg:x="4473" fg:w="8"/><text x="16.8801%" y="159.50"></text></g><g><title>advent_of_code_2016`core::fmt::Formatter::pad_integral::write_prefix (8 samples, 0.03%)</title><rect x="16.6301%" y="133" width="0.0297%" height="15" fill="rgb(222,148,37)" fg:x="4473" fg:w="8"/><text x="16.8801%" y="143.50"></text></g><g><title>advent_of_code_2016`core::fmt::num::imp::_&lt;impl core::fmt::Display for u32&gt;::fmt (1,138 samples, 4.23%)</title><rect x="12.4363%" y="165" width="4.2310%" height="15" fill="rgb(234,67,33)" fg:x="3345" fg:w="1138"/><text x="12.6863%" y="175.50">adven..</text></g><g><title>advent_of_code_2016`hex::BytesToHexChars::new (7 samples, 0.03%)</title><rect x="16.6673%" y="165" width="0.0260%" height="15" fill="rgb(247,98,35)" fg:x="4483" fg:w="7"/><text x="16.9173%" y="175.50"></text></g><g><title>advent_of_code_2016`md5::consume (406 samples, 1.51%)</title><rect x="17.1357%" y="149" width="1.5095%" height="15" fill="rgb(247,138,52)" fg:x="4609" fg:w="406"/><text x="17.3857%" y="159.50"></text></g><g><title>advent_of_code_2016`md5::Context::compute (2,295 samples, 8.53%)</title><rect x="16.6933%" y="165" width="8.5326%" height="15" fill="rgb(213,79,30)" fg:x="4490" fg:w="2295"/><text x="16.9433%" y="175.50">advent_of_co..</text></g><g><title>advent_of_code_2016`md5::transform (1,770 samples, 6.58%)</title><rect x="18.6452%" y="149" width="6.5807%" height="15" fill="rgb(246,177,23)" fg:x="5015" fg:w="1770"/><text x="18.8952%" y="159.50">advent_of..</text></g><g><title>advent_of_code_2016`md5::consume (155 samples, 0.58%)</title><rect x="25.2259%" y="165" width="0.5763%" height="15" fill="rgb(230,62,27)" fg:x="6785" fg:w="155"/><text x="25.4759%" y="175.50"></text></g><g><title>advent_of_code_2016`md5::transform (6 samples, 0.02%)</title><rect x="25.8021%" y="165" width="0.0223%" height="15" fill="rgb(216,154,8)" fg:x="6940" fg:w="6"/><text x="26.0521%" y="175.50"></text></g><g><title>libsystem_malloc.dylib`szone_malloc_should_clear (512 samples, 1.90%)</title><rect x="25.9694%" y="149" width="1.9036%" height="15" fill="rgb(244,35,45)" fg:x="6985" fg:w="512"/><text x="26.2194%" y="159.50">l..</text></g><g><title>libsystem_malloc.dylib`tiny_malloc_should_clear (489 samples, 1.82%)</title><rect x="26.0550%" y="133" width="1.8180%" height="15" fill="rgb(251,115,12)" fg:x="7008" fg:w="489"/><text x="26.3050%" y="143.50">l..</text></g><g><title>libsystem_malloc.dylib`_malloc_zone_malloc (561 samples, 2.09%)</title><rect x="25.8244%" y="165" width="2.0857%" height="15" fill="rgb(240,54,50)" fg:x="6946" fg:w="561"/><text x="26.0744%" y="175.50">l..</text></g><g><title>libsystem_malloc.dylib`tiny_malloc_should_clear (10 samples, 0.04%)</title><rect x="27.8730%" y="149" width="0.0372%" height="15" fill="rgb(233,84,52)" fg:x="7497" fg:w="10"/><text x="28.1230%" y="159.50"></text></g><g><title>libsystem_malloc.dylib`default_zone_malloc (11 samples, 0.04%)</title><rect x="27.9102%" y="165" width="0.0409%" height="15" fill="rgb(207,117,47)" fg:x="7507" fg:w="11"/><text x="28.1602%" y="175.50"></text></g><g><title>libsystem_malloc.dylib`szone_size (430 samples, 1.60%)</title><rect x="28.5348%" y="149" width="1.5987%" height="15" fill="rgb(249,43,39)" fg:x="7675" fg:w="430"/><text x="28.7848%" y="159.50"></text></g><g><title>libsystem_malloc.dylib`tiny_size (392 samples, 1.46%)</title><rect x="28.6761%" y="133" width="1.4574%" height="15" fill="rgb(209,38,44)" fg:x="7713" fg:w="392"/><text x="28.9261%" y="143.50"></text></g><g><title>libsystem_malloc.dylib`free (621 samples, 2.31%)</title><rect x="27.9511%" y="165" width="2.3088%" height="15" fill="rgb(236,212,23)" fg:x="7518" fg:w="621"/><text x="28.2011%" y="175.50">l..</text></g><g><title>libsystem_malloc.dylib`tiny_size (34 samples, 0.13%)</title><rect x="30.1335%" y="149" width="0.1264%" height="15" fill="rgb(242,79,21)" fg:x="8105" fg:w="34"/><text x="30.3835%" y="159.50"></text></g><g><title>libsystem_malloc.dylib`tiny_free_list_add_ptr (19 samples, 0.07%)</title><rect x="33.7882%" y="149" width="0.0706%" height="15" fill="rgb(211,96,35)" fg:x="9088" fg:w="19"/><text x="34.0382%" y="159.50"></text></g><g><title>libsystem_malloc.dylib`tiny_free_list_remove_ptr (3 samples, 0.01%)</title><rect x="33.8588%" y="149" width="0.0112%" height="15" fill="rgb(253,215,40)" fg:x="9107" fg:w="3"/><text x="34.1088%" y="159.50"></text></g><g><title>libsystem_malloc.dylib`tiny_free_list_add_ptr (490 samples, 1.82%)</title><rect x="35.4872%" y="133" width="1.8218%" height="15" fill="rgb(211,81,21)" fg:x="9545" fg:w="490"/><text x="35.7372%" y="143.50">l..</text></g><g><title>libsystem_malloc.dylib`free_tiny (1,970 samples, 7.32%)</title><rect x="30.2599%" y="165" width="7.3242%" height="15" fill="rgb(208,190,38)" fg:x="8139" fg:w="1970"/><text x="30.5099%" y="175.50">libsystem_..</text></g><g><title>libsystem_malloc.dylib`tiny_free_no_lock (999 samples, 3.71%)</title><rect x="33.8699%" y="149" width="3.7142%" height="15" fill="rgb(235,213,38)" fg:x="9110" fg:w="999"/><text x="34.1199%" y="159.50">libs..</text></g><g><title>libsystem_malloc.dylib`tiny_free_list_remove_ptr (74 samples, 0.28%)</title><rect x="37.3090%" y="133" width="0.2751%" height="15" fill="rgb(237,122,38)" fg:x="10035" fg:w="74"/><text x="37.5590%" y="143.50"></text></g><g><title>libsystem_malloc.dylib`malloc (6 samples, 0.02%)</title><rect x="37.5841%" y="165" width="0.0223%" height="15" fill="rgb(244,218,35)" fg:x="10109" fg:w="6"/><text x="37.8341%" y="175.50"></text></g><g><title>libsystem_malloc.dylib`szone_malloc_should_clear (5 samples, 0.02%)</title><rect x="37.6064%" y="165" width="0.0186%" height="15" fill="rgb(240,68,47)" fg:x="10115" fg:w="5"/><text x="37.8564%" y="175.50"></text></g><g><title>libsystem_malloc.dylib`szone_size (55 samples, 0.20%)</title><rect x="37.6250%" y="165" width="0.2045%" height="15" fill="rgb(210,16,53)" fg:x="10120" fg:w="55"/><text x="37.8750%" y="175.50"></text></g><g><title>libsystem_malloc.dylib`tiny_free_no_lock (33 samples, 0.12%)</title><rect x="37.8295%" y="165" width="0.1227%" height="15" fill="rgb(235,124,12)" fg:x="10175" fg:w="33"/><text x="38.0795%" y="175.50"></text></g><g><title>advent_of_code_2016`&lt;core::iter::adapters::map::Map&lt;I,F&gt; as core::iter::traits::iterator::Iterator&gt;::try_fold (10,207 samples, 37.95%)</title><rect x="0.0260%" y="181" width="37.9485%" height="15" fill="rgb(224,169,11)" fg:x="7" fg:w="10207"/><text x="0.2760%" y="191.50">advent_of_code_2016`&lt;core::iter::adapters::map::Map&lt;I,F&gt; as co..</text></g><g><title>libsystem_platform.dylib`_platform_memmove$VARIANT$Haswell (6 samples, 0.02%)</title><rect x="37.9522%" y="165" width="0.0223%" height="15" fill="rgb(250,166,2)" fg:x="10208" fg:w="6"/><text x="38.2022%" y="175.50"></text></g><g><title>advent_of_code_2016`DYLD-STUB$$free (13 samples, 0.05%)</title><rect x="37.9745%" y="181" width="0.0483%" height="15" fill="rgb(242,216,29)" fg:x="10214" fg:w="13"/><text x="38.2245%" y="191.50"></text></g><g><title>advent_of_code_2016`__rdl_dealloc (24 samples, 0.09%)</title><rect x="38.0265%" y="181" width="0.0892%" height="15" fill="rgb(230,116,27)" fg:x="10228" fg:w="24"/><text x="38.2765%" y="191.50"></text></g><g><title>advent_of_code_2016`__rust_dealloc (15 samples, 0.06%)</title><rect x="38.1232%" y="181" width="0.0558%" height="15" fill="rgb(228,99,48)" fg:x="10254" fg:w="15"/><text x="38.3732%" y="191.50"></text></g><g><title>advent_of_code_2016`alloc::str::_&lt;impl alloc::slice::Join&lt;&amp;str&gt; for [S]&gt;::join (8 samples, 0.03%)</title><rect x="38.1790%" y="181" width="0.0297%" height="15" fill="rgb(253,11,6)" fg:x="10269" fg:w="8"/><text x="38.4290%" y="191.50"></text></g><g><title>advent_of_code_2016`core::fmt::Formatter::new (4 samples, 0.01%)</title><rect x="38.2087%" y="181" width="0.0149%" height="15" fill="rgb(247,143,39)" fg:x="10277" fg:w="4"/><text x="38.4587%" y="191.50"></text></g><g><title>advent_of_code_2016`core::fmt::num::imp::_&lt;impl core::fmt::Display for u32&gt;::fmt (13 samples, 0.05%)</title><rect x="38.2236%" y="181" width="0.0483%" height="15" fill="rgb(236,97,10)" fg:x="10281" fg:w="13"/><text x="38.4736%" y="191.50"></text></g><g><title>advent_of_code_2016`hex::BytesToHexChars::new (8 samples, 0.03%)</title><rect x="38.2719%" y="181" width="0.0297%" height="15" fill="rgb(233,208,19)" fg:x="10294" fg:w="8"/><text x="38.5219%" y="191.50"></text></g><g><title>advent_of_code_2016`md5::Context::compute (4 samples, 0.01%)</title><rect x="38.3017%" y="181" width="0.0149%" height="15" fill="rgb(216,164,2)" fg:x="10302" fg:w="4"/><text x="38.5517%" y="191.50"></text></g><g><title>advent_of_code_2016`md5::consume (5 samples, 0.02%)</title><rect x="38.3165%" y="181" width="0.0186%" height="15" fill="rgb(220,129,5)" fg:x="10306" fg:w="5"/><text x="38.5665%" y="191.50"></text></g><g><title>libsystem_malloc.dylib`default_zone_free_definite_size (53 samples, 0.20%)</title><rect x="38.3351%" y="181" width="0.1970%" height="15" fill="rgb(242,17,10)" fg:x="10311" fg:w="53"/><text x="38.5851%" y="191.50"></text></g><g><title>libsystem_malloc.dylib`free (21 samples, 0.08%)</title><rect x="38.5322%" y="181" width="0.0781%" height="15" fill="rgb(242,107,0)" fg:x="10364" fg:w="21"/><text x="38.7822%" y="191.50"></text></g><g><title>libsystem_malloc.dylib`free_tiny (18 samples, 0.07%)</title><rect x="38.6103%" y="181" width="0.0669%" height="15" fill="rgb(251,28,31)" fg:x="10385" fg:w="18"/><text x="38.8603%" y="191.50"></text></g><g><title>advent_of_code_2016`&lt;advent_of_code_2016::days::day_05::Day05 as advent_of_code_2016::days::Solution&gt;::part_one (10,463 samples, 38.90%)</title><rect x="0.0000%" y="197" width="38.9002%" height="15" fill="rgb(233,223,10)" fg:x="0" fg:w="10463"/><text x="0.2500%" y="207.50">advent_of_code_2016`&lt;advent_of_code_2016::days::day_05::Day05 a..</text></g><g><title>libsystem_malloc.dylib`szone_free_definite_size (58 samples, 0.22%)</title><rect x="38.6846%" y="181" width="0.2156%" height="15" fill="rgb(215,21,27)" fg:x="10405" fg:w="58"/><text x="38.9346%" y="191.50"></text></g><g><title>advent_of_code_2016`&lt;hex::BytesToHexChars as core::iter::traits::iterator::Iterator&gt;::next (1,190 samples, 4.42%)</title><rect x="43.2911%" y="165" width="4.4243%" height="15" fill="rgb(232,23,21)" fg:x="11644" fg:w="1190"/><text x="43.5411%" y="175.50">adven..</text></g><g><title>advent_of_code_2016`&lt;hex::BytesToHexChars as core::iter::traits::iterator::Iterator&gt;::size_hint (13 samples, 0.05%)</title><rect x="47.7154%" y="165" width="0.0483%" height="15" fill="rgb(244,5,23)" fg:x="12834" fg:w="13"/><text x="47.9654%" y="175.50"></text></g><g><title>advent_of_code_2016`__rust_alloc (4 samples, 0.01%)</title><rect x="47.8641%" y="149" width="0.0149%" height="15" fill="rgb(226,81,46)" fg:x="12874" fg:w="4"/><text x="48.1141%" y="159.50"></text></g><g><title>libsystem_malloc.dylib`tiny_malloc_from_free_list (3 samples, 0.01%)</title><rect x="48.2991%" y="101" width="0.0112%" height="15" fill="rgb(247,70,30)" fg:x="12991" fg:w="3"/><text x="48.5491%" y="111.50"></text></g><g><title>libsystem_malloc.dylib`set_tiny_meta_header_in_use (133 samples, 0.49%)</title><rect x="50.8421%" y="85" width="0.4945%" height="15" fill="rgb(212,68,19)" fg:x="13675" fg:w="133"/><text x="51.0921%" y="95.50"></text></g><g><title>libsystem_malloc.dylib`szone_malloc_should_clear (967 samples, 3.60%)</title><rect x="48.1355%" y="117" width="3.5952%" height="15" fill="rgb(240,187,13)" fg:x="12947" fg:w="967"/><text x="48.3855%" y="127.50">libs..</text></g><g><title>libsystem_malloc.dylib`tiny_malloc_should_clear (920 samples, 3.42%)</title><rect x="48.3102%" y="101" width="3.4205%" height="15" fill="rgb(223,113,26)" fg:x="12994" fg:w="920"/><text x="48.5602%" y="111.50">lib..</text></g><g><title>libsystem_malloc.dylib`tiny_malloc_from_free_list (106 samples, 0.39%)</title><rect x="51.3366%" y="85" width="0.3941%" height="15" fill="rgb(206,192,2)" fg:x="13808" fg:w="106"/><text x="51.5866%" y="95.50"></text></g><g><title>libsystem_malloc.dylib`_malloc_zone_malloc (1,018 samples, 3.78%)</title><rect x="47.9868%" y="133" width="3.7848%" height="15" fill="rgb(241,108,4)" fg:x="12907" fg:w="1018"/><text x="48.2368%" y="143.50">libs..</text></g><g><title>libsystem_malloc.dylib`tiny_malloc_should_clear (11 samples, 0.04%)</title><rect x="51.7307%" y="117" width="0.0409%" height="15" fill="rgb(247,173,49)" fg:x="13914" fg:w="11"/><text x="51.9807%" y="127.50"></text></g><g><title>libsystem_malloc.dylib`default_zone_malloc (16 samples, 0.06%)</title><rect x="51.7716%" y="133" width="0.0595%" height="15" fill="rgb(224,114,35)" fg:x="13925" fg:w="16"/><text x="52.0216%" y="143.50"></text></g><g><title>advent_of_code_2016`alloc::raw_vec::finish_grow (1,071 samples, 3.98%)</title><rect x="47.8789%" y="149" width="3.9819%" height="15" fill="rgb(245,159,27)" fg:x="12878" fg:w="1071"/><text x="48.1289%" y="159.50">adve..</text></g><g><title>libsystem_malloc.dylib`szone_malloc_should_clear (8 samples, 0.03%)</title><rect x="51.8311%" y="133" width="0.0297%" height="15" fill="rgb(245,172,44)" fg:x="13941" fg:w="8"/><text x="52.0811%" y="143.50"></text></g><g><title>libsystem_malloc.dylib`_malloc_zone_malloc (11 samples, 0.04%)</title><rect x="51.8608%" y="149" width="0.0409%" height="15" fill="rgb(236,23,11)" fg:x="13949" fg:w="11"/><text x="52.1108%" y="159.50"></text></g><g><title>advent_of_code_2016`alloc::raw_vec::RawVec&lt;T,A&gt;::reserve::do_reserve_and_handle (1,125 samples, 4.18%)</title><rect x="47.7637%" y="165" width="4.1826%" height="15" fill="rgb(205,117,38)" fg:x="12847" fg:w="1125"/><text x="48.0137%" y="175.50">adven..</text></g><g><title>libsystem_malloc.dylib`malloc (12 samples, 0.04%)</title><rect x="51.9017%" y="149" width="0.0446%" height="15" fill="rgb(237,72,25)" fg:x="13960" fg:w="12"/><text x="52.1517%" y="159.50"></text></g><g><title>advent_of_code_2016`&lt;alloc::string::String as core::iter::traits::collect::FromIterator&lt;char&gt;&gt;::from_iter (3,042 samples, 11.31%)</title><rect x="40.6886%" y="181" width="11.3098%" height="15" fill="rgb(244,70,9)" fg:x="10944" fg:w="3042"/><text x="40.9386%" y="191.50">advent_of_code_20..</text></g><g><title>advent_of_code_2016`alloc::raw_vec::finish_grow (14 samples, 0.05%)</title><rect x="51.9463%" y="165" width="0.0521%" height="15" fill="rgb(217,125,39)" fg:x="13972" fg:w="14"/><text x="52.1963%" y="175.50"></text></g><g><title>advent_of_code_2016`&lt;hex::BytesToHexChars as core::iter::traits::iterator::Iterator&gt;::next (373 samples, 1.39%)</title><rect x="51.9984%" y="181" width="1.3868%" height="15" fill="rgb(235,36,10)" fg:x="13986" fg:w="373"/><text x="52.2484%" y="191.50"></text></g><g><title>advent_of_code_2016`&lt;hex::BytesToHexChars as core::iter::traits::iterator::Iterator&gt;::size_hint (17 samples, 0.06%)</title><rect x="53.3851%" y="181" width="0.0632%" height="15" fill="rgb(251,123,47)" fg:x="14359" fg:w="17"/><text x="53.6351%" y="191.50"></text></g><g><title>advent_of_code_2016`DYLD-STUB$$memcpy (9 samples, 0.03%)</title><rect x="53.4483%" y="181" width="0.0335%" height="15" fill="rgb(221,13,13)" fg:x="14376" fg:w="9"/><text x="53.6983%" y="191.50"></text></g><g><title>advent_of_code_2016`__rdl_dealloc (7 samples, 0.03%)</title><rect x="53.4855%" y="181" width="0.0260%" height="15" fill="rgb(238,131,9)" fg:x="14386" fg:w="7"/><text x="53.7355%" y="191.50"></text></g><g><title>advent_of_code_2016`__rust_alloc (7 samples, 0.03%)</title><rect x="53.5115%" y="181" width="0.0260%" height="15" fill="rgb(211,50,8)" fg:x="14393" fg:w="7"/><text x="53.7615%" y="191.50"></text></g><g><title>advent_of_code_2016`alloc::raw_vec::RawVec&lt;T,A&gt;::reserve::do_reserve_and_handle (17 samples, 0.06%)</title><rect x="53.5376%" y="181" width="0.0632%" height="15" fill="rgb(245,182,24)" fg:x="14400" fg:w="17"/><text x="53.7876%" y="191.50"></text></g><g><title>libsystem_malloc.dylib`tiny_malloc_from_free_list (11 samples, 0.04%)</title><rect x="54.3815%" y="133" width="0.0409%" height="15" fill="rgb(242,14,37)" fg:x="14627" fg:w="11"/><text x="54.6315%" y="143.50"></text></g><g><title>libsystem_malloc.dylib`tiny_free_list_add_ptr (3 samples, 0.01%)</title><rect x="56.7201%" y="117" width="0.0112%" height="15" fill="rgb(246,228,12)" fg:x="15256" fg:w="3"/><text x="56.9701%" y="127.50"></text></g><g><title>libsystem_malloc.dylib`szone_malloc_should_clear (937 samples, 3.48%)</title><rect x="54.2477%" y="149" width="3.4837%" height="15" fill="rgb(213,55,15)" fg:x="14591" fg:w="937"/><text x="54.4977%" y="159.50">lib..</text></g><g><title>libsystem_malloc.dylib`tiny_malloc_should_clear (890 samples, 3.31%)</title><rect x="54.4224%" y="133" width="3.3089%" height="15" fill="rgb(209,9,3)" fg:x="14638" fg:w="890"/><text x="54.6724%" y="143.50">lib..</text></g><g><title>libsystem_malloc.dylib`tiny_malloc_from_free_list (269 samples, 1.00%)</title><rect x="56.7312%" y="117" width="1.0001%" height="15" fill="rgb(230,59,30)" fg:x="15259" fg:w="269"/><text x="56.9812%" y="127.50"></text></g><g><title>libsystem_malloc.dylib`tiny_free_list_add_ptr (57 samples, 0.21%)</title><rect x="57.5194%" y="101" width="0.2119%" height="15" fill="rgb(209,121,21)" fg:x="15471" fg:w="57"/><text x="57.7694%" y="111.50"></text></g><g><title>libsystem_malloc.dylib`_malloc_zone_malloc (995 samples, 3.70%)</title><rect x="54.0618%" y="165" width="3.6993%" height="15" fill="rgb(220,109,13)" fg:x="14541" fg:w="995"/><text x="54.3118%" y="175.50">libs..</text></g><g><title>libsystem_malloc.dylib`tiny_malloc_should_clear (8 samples, 0.03%)</title><rect x="57.7313%" y="149" width="0.0297%" height="15" fill="rgb(232,18,1)" fg:x="15528" fg:w="8"/><text x="57.9813%" y="159.50"></text></g><g><title>libsystem_malloc.dylib`default_zone_malloc (23 samples, 0.09%)</title><rect x="57.7611%" y="165" width="0.0855%" height="15" fill="rgb(215,41,42)" fg:x="15536" fg:w="23"/><text x="58.0111%" y="175.50"></text></g><g><title>libsystem_malloc.dylib`szone_malloc_should_clear (4 samples, 0.01%)</title><rect x="57.8540%" y="165" width="0.0149%" height="15" fill="rgb(224,123,36)" fg:x="15561" fg:w="4"/><text x="58.1040%" y="175.50"></text></g><g><title>advent_of_code_2016`alloc::str::_&lt;impl alloc::slice::Join&lt;&amp;str&gt; for [S]&gt;::join (1,191 samples, 4.43%)</title><rect x="53.6008%" y="181" width="4.4280%" height="15" fill="rgb(240,125,3)" fg:x="14417" fg:w="1191"/><text x="53.8508%" y="191.50">adven..</text></g><g><title>libsystem_platform.dylib`_platform_memmove$VARIANT$Haswell (43 samples, 0.16%)</title><rect x="57.8689%" y="165" width="0.1599%" height="15" fill="rgb(205,98,50)" fg:x="15565" fg:w="43"/><text x="58.1189%" y="175.50"></text></g><g><title>advent_of_code_2016`core::fmt::Formatter::new (11 samples, 0.04%)</title><rect x="58.0288%" y="181" width="0.0409%" height="15" fill="rgb(205,185,37)" fg:x="15608" fg:w="11"/><text x="58.2788%" y="191.50"></text></g><g><title>advent_of_code_2016`core::fmt::Formatter::pad_integral (10 samples, 0.04%)</title><rect x="58.0697%" y="181" width="0.0372%" height="15" fill="rgb(238,207,15)" fg:x="15619" fg:w="10"/><text x="58.3197%" y="191.50"></text></g><g><title>advent_of_code_2016`__rdl_alloc (4 samples, 0.01%)</title><rect x="59.1441%" y="133" width="0.0149%" height="15" fill="rgb(213,199,42)" fg:x="15908" fg:w="4"/><text x="59.3941%" y="143.50"></text></g><g><title>advent_of_code_2016`__rust_alloc (17 samples, 0.06%)</title><rect x="59.1590%" y="133" width="0.0632%" height="15" fill="rgb(235,201,11)" fg:x="15912" fg:w="17"/><text x="59.4090%" y="143.50"></text></g><g><title>libsystem_malloc.dylib`tiny_malloc_from_free_list (8 samples, 0.03%)</title><rect x="59.8394%" y="85" width="0.0297%" height="15" fill="rgb(207,46,11)" fg:x="16095" fg:w="8"/><text x="60.0894%" y="95.50"></text></g><g><title>libsystem_malloc.dylib`tiny_free_list_add_ptr (3 samples, 0.01%)</title><rect x="62.4902%" y="69" width="0.0112%" height="15" fill="rgb(241,35,35)" fg:x="16808" fg:w="3"/><text x="62.7402%" y="79.50"></text></g><g><title>libsystem_malloc.dylib`szone_malloc_should_clear (1,002 samples, 3.73%)</title><rect x="59.6981%" y="101" width="3.7253%" height="15" fill="rgb(243,32,47)" fg:x="16057" fg:w="1002"/><text x="59.9481%" y="111.50">libs..</text></g><g><title>libsystem_malloc.dylib`tiny_malloc_should_clear (956 samples, 3.55%)</title><rect x="59.8691%" y="85" width="3.5543%" height="15" fill="rgb(247,202,23)" fg:x="16103" fg:w="956"/><text x="60.1191%" y="95.50">libs..</text></g><g><title>libsystem_malloc.dylib`tiny_malloc_from_free_list (248 samples, 0.92%)</title><rect x="62.5014%" y="69" width="0.9220%" height="15" fill="rgb(219,102,11)" fg:x="16811" fg:w="248"/><text x="62.7514%" y="79.50"></text></g><g><title>libsystem_malloc.dylib`tiny_free_list_add_ptr (58 samples, 0.22%)</title><rect x="63.2078%" y="53" width="0.2156%" height="15" fill="rgb(243,110,44)" fg:x="17001" fg:w="58"/><text x="63.4578%" y="63.50"></text></g><g><title>libsystem_malloc.dylib`_malloc_zone_malloc (1,111 samples, 4.13%)</title><rect x="59.3189%" y="117" width="4.1306%" height="15" fill="rgb(222,74,54)" fg:x="15955" fg:w="1111"/><text x="59.5689%" y="127.50">libsy..</text></g><g><title>libsystem_malloc.dylib`tiny_malloc_should_clear (7 samples, 0.03%)</title><rect x="63.4234%" y="101" width="0.0260%" height="15" fill="rgb(216,99,12)" fg:x="17059" fg:w="7"/><text x="63.6734%" y="111.50"></text></g><g><title>libsystem_malloc.dylib`default_zone_malloc (30 samples, 0.11%)</title><rect x="63.4495%" y="117" width="0.1115%" height="15" fill="rgb(226,22,26)" fg:x="17066" fg:w="30"/><text x="63.6995%" y="127.50"></text></g><g><title>libsystem_malloc.dylib`szone_malloc (9 samples, 0.03%)</title><rect x="63.5610%" y="117" width="0.0335%" height="15" fill="rgb(217,163,10)" fg:x="17096" fg:w="9"/><text x="63.8110%" y="127.50"></text></g><g><title>advent_of_code_2016`alloc::raw_vec::finish_grow (1,178 samples, 4.38%)</title><rect x="59.2222%" y="133" width="4.3797%" height="15" fill="rgb(213,25,53)" fg:x="15929" fg:w="1178"/><text x="59.4722%" y="143.50">adven..</text></g><g><title>libsystem_malloc.dylib`_malloc_zone_malloc (15 samples, 0.06%)</title><rect x="63.6019%" y="133" width="0.0558%" height="15" fill="rgb(252,105,26)" fg:x="17107" fg:w="15"/><text x="63.8519%" y="143.50"></text></g><g><title>advent_of_code_2016`alloc::raw_vec::RawVec&lt;T,A&gt;::reserve::do_reserve_and_handle (1,253 samples, 4.66%)</title><rect x="59.0140%" y="149" width="4.6585%" height="15" fill="rgb(220,39,43)" fg:x="15873" fg:w="1253"/><text x="59.2640%" y="159.50">adven..</text></g><g><title>libsystem_malloc.dylib`malloc (4 samples, 0.01%)</title><rect x="63.6577%" y="133" width="0.0149%" height="15" fill="rgb(229,68,48)" fg:x="17122" fg:w="4"/><text x="63.9077%" y="143.50"></text></g><g><title>advent_of_code_2016`alloc::raw_vec::finish_grow (32 samples, 0.12%)</title><rect x="63.6725%" y="149" width="0.1190%" height="15" fill="rgb(252,8,32)" fg:x="17126" fg:w="32"/><text x="63.9225%" y="159.50"></text></g><g><title>advent_of_code_2016`&lt;alloc::string::String as core::fmt::Write&gt;::write_str (1,339 samples, 4.98%)</title><rect x="58.8802%" y="165" width="4.9783%" height="15" fill="rgb(223,20,43)" fg:x="15837" fg:w="1339"/><text x="59.1302%" y="175.50">advent..</text></g><g><title>libsystem_platform.dylib`_platform_memmove$VARIANT$Haswell (18 samples, 0.07%)</title><rect x="63.7915%" y="149" width="0.0669%" height="15" fill="rgb(229,81,49)" fg:x="17158" fg:w="18"/><text x="64.0415%" y="159.50"></text></g><g><title>advent_of_code_2016`DYLD-STUB$$memcpy (11 samples, 0.04%)</title><rect x="63.8584%" y="165" width="0.0409%" height="15" fill="rgb(236,28,36)" fg:x="17176" fg:w="11"/><text x="64.1084%" y="175.50"></text></g><g><title>advent_of_code_2016`alloc::raw_vec::RawVec&lt;T,A&gt;::reserve::do_reserve_and_handle (7 samples, 0.03%)</title><rect x="63.8993%" y="165" width="0.0260%" height="15" fill="rgb(249,185,26)" fg:x="17187" fg:w="7"/><text x="64.1493%" y="175.50"></text></g><g><title>advent_of_code_2016`core::fmt::Formatter::pad_integral (56 samples, 0.21%)</title><rect x="63.9253%" y="165" width="0.2082%" height="15" fill="rgb(249,174,33)" fg:x="17194" fg:w="56"/><text x="64.1753%" y="175.50"></text></g><g><title>advent_of_code_2016`core::fmt::Formatter::pad_integral::write_prefix (8 samples, 0.03%)</title><rect x="64.1335%" y="165" width="0.0297%" height="15" fill="rgb(233,201,37)" fg:x="17250" fg:w="8"/><text x="64.3835%" y="175.50"></text></g><g><title>advent_of_code_2016`core::fmt::Formatter::pad_integral (12 samples, 0.04%)</title><rect x="64.1633%" y="165" width="0.0446%" height="15" fill="rgb(221,78,26)" fg:x="17258" fg:w="12"/><text x="64.4133%" y="175.50"></text></g><g><title>advent_of_code_2016`core::fmt::Formatter::pad_integral::write_prefix (12 samples, 0.04%)</title><rect x="64.1633%" y="149" width="0.0446%" height="15" fill="rgb(250,127,30)" fg:x="17258" fg:w="12"/><text x="64.4133%" y="159.50"></text></g><g><title>advent_of_code_2016`core::fmt::num::imp::_&lt;impl core::fmt::Display for i32&gt;::fmt (1,646 samples, 6.12%)</title><rect x="58.1069%" y="181" width="6.1196%" height="15" fill="rgb(230,49,44)" fg:x="15629" fg:w="1646"/><text x="58.3569%" y="191.50">advent_o..</text></g><g><title>libsystem_platform.dylib`_platform_memmove$VARIANT$Haswell (5 samples, 0.02%)</title><rect x="64.2079%" y="165" width="0.0186%" height="15" fill="rgb(229,67,23)" fg:x="17270" fg:w="5"/><text x="64.4579%" y="175.50"></text></g><g><title>advent_of_code_2016`hex::BytesToHexChars::new (10 samples, 0.04%)</title><rect x="64.2265%" y="181" width="0.0372%" height="15" fill="rgb(249,83,47)" fg:x="17275" fg:w="10"/><text x="64.4765%" y="191.50"></text></g><g><title>advent_of_code_2016`md5::consume (646 samples, 2.40%)</title><rect x="65.0370%" y="165" width="2.4018%" height="15" fill="rgb(215,43,3)" fg:x="17493" fg:w="646"/><text x="65.2870%" y="175.50">ad..</text></g><g><title>advent_of_code_2016`md5::Context::compute (3,712 samples, 13.80%)</title><rect x="64.2637%" y="181" width="13.8008%" height="15" fill="rgb(238,154,13)" fg:x="17285" fg:w="3712"/><text x="64.5137%" y="191.50">advent_of_code_2016`m..</text></g><g><title>advent_of_code_2016`md5::transform (2,858 samples, 10.63%)</title><rect x="67.4387%" y="165" width="10.6257%" height="15" fill="rgb(219,56,2)" fg:x="18139" fg:w="2858"/><text x="67.6887%" y="175.50">advent_of_code_2..</text></g><g><title>advent_of_code_2016`md5::consume (246 samples, 0.91%)</title><rect x="78.0645%" y="181" width="0.9146%" height="15" fill="rgb(233,0,4)" fg:x="20997" fg:w="246"/><text x="78.3145%" y="191.50"></text></g><g><title>advent_of_code_2016`md5::transform (7 samples, 0.03%)</title><rect x="78.9791%" y="181" width="0.0260%" height="15" fill="rgb(235,30,7)" fg:x="21243" fg:w="7"/><text x="79.2291%" y="191.50"></text></g><g><title>libsystem_malloc.dylib`szone_malloc_should_clear (778 samples, 2.89%)</title><rect x="79.2021%" y="165" width="2.8925%" height="15" fill="rgb(250,79,13)" fg:x="21303" fg:w="778"/><text x="79.4521%" y="175.50">li..</text></g><g><title>libsystem_malloc.dylib`tiny_malloc_should_clear (742 samples, 2.76%)</title><rect x="79.3360%" y="149" width="2.7587%" height="15" fill="rgb(211,146,34)" fg:x="21339" fg:w="742"/><text x="79.5860%" y="159.50">li..</text></g><g><title>libsystem_malloc.dylib`_malloc_zone_malloc (841 samples, 3.13%)</title><rect x="79.0051%" y="181" width="3.1267%" height="15" fill="rgb(228,22,38)" fg:x="21250" fg:w="841"/><text x="79.2551%" y="191.50">lib..</text></g><g><title>libsystem_malloc.dylib`tiny_malloc_should_clear (10 samples, 0.04%)</title><rect x="82.0947%" y="165" width="0.0372%" height="15" fill="rgb(235,168,5)" fg:x="22081" fg:w="10"/><text x="82.3447%" y="175.50"></text></g><g><title>libsystem_malloc.dylib`default_zone_malloc (13 samples, 0.05%)</title><rect x="82.1318%" y="181" width="0.0483%" height="15" fill="rgb(221,155,16)" fg:x="22091" fg:w="13"/><text x="82.3818%" y="191.50"></text></g><g><title>libsystem_malloc.dylib`szone_size (674 samples, 2.51%)</title><rect x="83.3141%" y="165" width="2.5059%" height="15" fill="rgb(215,215,53)" fg:x="22409" fg:w="674"/><text x="83.5641%" y="175.50">li..</text></g><g><title>libsystem_malloc.dylib`tiny_size (623 samples, 2.32%)</title><rect x="83.5037%" y="149" width="2.3162%" height="15" fill="rgb(223,4,10)" fg:x="22460" fg:w="623"/><text x="83.7537%" y="159.50">l..</text></g><g><title>libsystem_malloc.dylib`free (1,064 samples, 3.96%)</title><rect x="82.1802%" y="181" width="3.9558%" height="15" fill="rgb(234,103,6)" fg:x="22104" fg:w="1064"/><text x="82.4302%" y="191.50">libs..</text></g><g><title>libsystem_malloc.dylib`tiny_size (85 samples, 0.32%)</title><rect x="85.8200%" y="165" width="0.3160%" height="15" fill="rgb(227,97,0)" fg:x="23083" fg:w="85"/><text x="86.0700%" y="175.50"></text></g><g><title>libsystem_malloc.dylib`tiny_free_list_add_ptr (33 samples, 0.12%)</title><rect x="91.8392%" y="165" width="0.1227%" height="15" fill="rgb(234,150,53)" fg:x="24702" fg:w="33"/><text x="92.0892%" y="175.50"></text></g><g><title>libsystem_malloc.dylib`tiny_free_list_remove_ptr (9 samples, 0.03%)</title><rect x="91.9619%" y="165" width="0.0335%" height="15" fill="rgb(228,201,54)" fg:x="24735" fg:w="9"/><text x="92.2119%" y="175.50"></text></g><g><title>libsystem_malloc.dylib`tiny_free_list_add_ptr (753 samples, 2.80%)</title><rect x="94.4306%" y="149" width="2.7996%" height="15" fill="rgb(222,22,37)" fg:x="25399" fg:w="753"/><text x="94.6806%" y="159.50">li..</text></g><g><title>libsystem_malloc.dylib`free_tiny (3,116 samples, 11.58%)</title><rect x="86.1360%" y="181" width="11.5849%" height="15" fill="rgb(237,53,32)" fg:x="23168" fg:w="3116"/><text x="86.3860%" y="191.50">libsystem_malloc...</text></g><g><title>libsystem_malloc.dylib`tiny_free_no_lock (1,540 samples, 5.73%)</title><rect x="91.9954%" y="165" width="5.7255%" height="15" fill="rgb(233,25,53)" fg:x="24744" fg:w="1540"/><text x="92.2454%" y="175.50">libsyst..</text></g><g><title>libsystem_malloc.dylib`tiny_free_list_remove_ptr (132 samples, 0.49%)</title><rect x="97.2302%" y="149" width="0.4908%" height="15" fill="rgb(210,40,34)" fg:x="26152" fg:w="132"/><text x="97.4802%" y="159.50"></text></g><g><title>libsystem_malloc.dylib`malloc (8 samples, 0.03%)</title><rect x="97.7209%" y="181" width="0.0297%" height="15" fill="rgb(241,220,44)" fg:x="26284" fg:w="8"/><text x="97.9709%" y="191.50"></text></g><g><title>libsystem_malloc.dylib`szone_malloc_should_clear (7 samples, 0.03%)</title><rect x="97.7507%" y="181" width="0.0260%" height="15" fill="rgb(235,28,35)" fg:x="26292" fg:w="7"/><text x="98.0007%" y="191.50"></text></g><g><title>libsystem_malloc.dylib`szone_size (102 samples, 0.38%)</title><rect x="97.7767%" y="181" width="0.3792%" height="15" fill="rgb(210,56,17)" fg:x="26299" fg:w="102"/><text x="98.0267%" y="191.50"></text></g><g><title>libsystem_malloc.dylib`tiny_free_no_lock (37 samples, 0.14%)</title><rect x="98.1559%" y="181" width="0.1376%" height="15" fill="rgb(224,130,29)" fg:x="26401" fg:w="37"/><text x="98.4059%" y="191.50"></text></g><g><title>advent_of_code_2016`&lt;advent_of_code_2016::days::day_05::Day05 as advent_of_code_2016::days::Solution&gt;::part_two (15,987 samples, 59.44%)</title><rect x="38.9002%" y="197" width="59.4379%" height="15" fill="rgb(235,212,8)" fg:x="10463" fg:w="15987"/><text x="39.1502%" y="207.50">advent_of_code_2016`&lt;advent_of_code_2016::days::day_05::Day05 as advent_of_code_2016::days::Soluti..</text></g><g><title>libsystem_platform.dylib`_platform_memmove$VARIANT$Haswell (12 samples, 0.04%)</title><rect x="98.2935%" y="181" width="0.0446%" height="15" fill="rgb(223,33,50)" fg:x="26438" fg:w="12"/><text x="98.5435%" y="191.50"></text></g><g><title>advent_of_code_2016`&lt;alloc::string::String as core::iter::traits::collect::FromIterator&lt;char&gt;&gt;::from_iter (22 samples, 0.08%)</title><rect x="98.3381%" y="197" width="0.0818%" height="15" fill="rgb(219,149,13)" fg:x="26450" fg:w="22"/><text x="98.5881%" y="207.50"></text></g><g><title>advent_of_code_2016`DYLD-STUB$$free (11 samples, 0.04%)</title><rect x="98.4199%" y="197" width="0.0409%" height="15" fill="rgb(250,156,29)" fg:x="26472" fg:w="11"/><text x="98.6699%" y="207.50"></text></g><g><title>advent_of_code_2016`__rdl_alloc (5 samples, 0.02%)</title><rect x="98.4608%" y="197" width="0.0186%" height="15" fill="rgb(216,193,19)" fg:x="26483" fg:w="5"/><text x="98.7108%" y="207.50"></text></g><g><title>advent_of_code_2016`__rdl_dealloc (31 samples, 0.12%)</title><rect x="98.4794%" y="197" width="0.1153%" height="15" fill="rgb(216,135,14)" fg:x="26488" fg:w="31"/><text x="98.7294%" y="207.50"></text></g><g><title>advent_of_code_2016`__rust_alloc (6 samples, 0.02%)</title><rect x="98.5946%" y="197" width="0.0223%" height="15" fill="rgb(241,47,5)" fg:x="26519" fg:w="6"/><text x="98.8446%" y="207.50"></text></g><g><title>advent_of_code_2016`__rust_dealloc (32 samples, 0.12%)</title><rect x="98.6169%" y="197" width="0.1190%" height="15" fill="rgb(233,42,35)" fg:x="26525" fg:w="32"/><text x="98.8669%" y="207.50"></text></g><g><title>advent_of_code_2016`alloc::str::_&lt;impl alloc::slice::Join&lt;&amp;str&gt; for [S]&gt;::join (12 samples, 0.04%)</title><rect x="98.7359%" y="197" width="0.0446%" height="15" fill="rgb(231,13,6)" fg:x="26557" fg:w="12"/><text x="98.9859%" y="207.50"></text></g><g><title>advent_of_code_2016`core::fmt::Formatter::new (13 samples, 0.05%)</title><rect x="98.7805%" y="197" width="0.0483%" height="15" fill="rgb(207,181,40)" fg:x="26569" fg:w="13"/><text x="99.0305%" y="207.50"></text></g><g><title>advent_of_code_2016`core::fmt::num::imp::_&lt;impl core::fmt::Display for i32&gt;::fmt (16 samples, 0.06%)</title><rect x="98.8289%" y="197" width="0.0595%" height="15" fill="rgb(254,173,49)" fg:x="26582" fg:w="16"/><text x="99.0789%" y="207.50"></text></g><g><title>advent_of_code_2016`hex::BytesToHexChars::new (7 samples, 0.03%)</title><rect x="98.8884%" y="197" width="0.0260%" height="15" fill="rgb(221,1,38)" fg:x="26598" fg:w="7"/><text x="99.1384%" y="207.50"></text></g><g><title>advent_of_code_2016`md5::Context::compute (12 samples, 0.04%)</title><rect x="98.9144%" y="197" width="0.0446%" height="15" fill="rgb(206,124,46)" fg:x="26605" fg:w="12"/><text x="99.1644%" y="207.50"></text></g><g><title>advent_of_code_2016`md5::consume (22 samples, 0.08%)</title><rect x="98.9590%" y="197" width="0.0818%" height="15" fill="rgb(249,21,11)" fg:x="26617" fg:w="22"/><text x="99.2090%" y="207.50"></text></g><g><title>libsystem_malloc.dylib`default_zone_free_definite_size (99 samples, 0.37%)</title><rect x="99.0408%" y="197" width="0.3681%" height="15" fill="rgb(222,201,40)" fg:x="26639" fg:w="99"/><text x="99.2908%" y="207.50"></text></g><g><title>libsystem_malloc.dylib`free (41 samples, 0.15%)</title><rect x="99.4089%" y="197" width="0.1524%" height="15" fill="rgb(235,61,29)" fg:x="26738" fg:w="41"/><text x="99.6589%" y="207.50"></text></g><g><title>libsystem_malloc.dylib`free_tiny (35 samples, 0.13%)</title><rect x="99.5613%" y="197" width="0.1301%" height="15" fill="rgb(219,207,3)" fg:x="26779" fg:w="35"/><text x="99.8113%" y="207.50"></text></g><g><title>libsystem_malloc.dylib`malloc (7 samples, 0.03%)</title><rect x="99.6914%" y="197" width="0.0260%" height="15" fill="rgb(222,56,46)" fg:x="26814" fg:w="7"/><text x="99.9414%" y="207.50"></text></g><g><title>all (26,897 samples, 100%)</title><rect x="0.0000%" y="325" width="100.0000%" height="15" fill="rgb(239,76,54)" fg:x="0" fg:w="26897"/><text x="0.2500%" y="335.50"></text></g><g><title>0x1 (26,897 samples, 100.00%)</title><rect x="0.0000%" y="309" width="100.0000%" height="15" fill="rgb(231,124,27)" fg:x="0" fg:w="26897"/><text x="0.2500%" y="319.50">0x1</text></g><g><title>libdyld.dylib`start (26,897 samples, 100.00%)</title><rect x="0.0000%" y="293" width="100.0000%" height="15" fill="rgb(249,195,6)" fg:x="0" fg:w="26897"/><text x="0.2500%" y="303.50">libdyld.dylib`start</text></g><g><title>advent_of_code_2016`main (26,897 samples, 100.00%)</title><rect x="0.0000%" y="277" width="100.0000%" height="15" fill="rgb(237,174,47)" fg:x="0" fg:w="26897"/><text x="0.2500%" y="287.50">advent_of_code_2016`main</text></g><g><title>advent_of_code_2016`std::rt::lang_start_internal (26,897 samples, 100.00%)</title><rect x="0.0000%" y="261" width="100.0000%" height="15" fill="rgb(206,201,31)" fg:x="0" fg:w="26897"/><text x="0.2500%" y="271.50">advent_of_code_2016`std::rt::lang_start_internal</text></g><g><title>advent_of_code_2016`std::rt::lang_start::_{{closure}} (26,897 samples, 100.00%)</title><rect x="0.0000%" y="245" width="100.0000%" height="15" fill="rgb(231,57,52)" fg:x="0" fg:w="26897"/><text x="0.2500%" y="255.50">advent_of_code_2016`std::rt::lang_start::_{{closure}}</text></g><g><title>advent_of_code_2016`std::sys_common::backtrace::__rust_begin_short_backtrace (26,897 samples, 100.00%)</title><rect x="0.0000%" y="229" width="100.0000%" height="15" fill="rgb(248,177,22)" fg:x="0" fg:w="26897"/><text x="0.2500%" y="239.50">advent_of_code_2016`std::sys_common::backtrace::__rust_begin_short_backtrace</text></g><g><title>advent_of_code_2016`advent_of_code_2016::days::run (26,897 samples, 100.00%)</title><rect x="0.0000%" y="213" width="100.0000%" height="15" fill="rgb(215,211,37)" fg:x="0" fg:w="26897"/><text x="0.2500%" y="223.50">advent_of_code_2016`advent_of_code_2016::days::run</text></g><g><title>libsystem_malloc.dylib`szone_free_definite_size (76 samples, 0.28%)</title><rect x="99.7174%" y="197" width="0.2826%" height="15" fill="rgb(241,128,51)" fg:x="26821" fg:w="76"/><text x="99.9674%" y="207.50"></text></g></svg></svg>

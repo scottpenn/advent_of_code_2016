@@ -5,9 +5,13 @@ edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[profile.release]
+debug = true
+
 [dependencies]
 itertools = "0.10.3"
 regex = "1.5.4"
 counter = "0.5.2"
 md5 = "0.7.0"
 arraydeque = "0.4.5"
+hex = "0.4.3"

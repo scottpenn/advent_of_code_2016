@@ -1,6 +1,6 @@
 mod days;
 
-const MAX_DAY: u8 = 7;
+const MAX_DAY: u8 = 5;
 
 fn main() {
     days::run(MAX_DAY);
